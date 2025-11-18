@@ -1,0 +1,525 @@
+/*
+  # Create user profiles table
+
+  1. New Tables
+    - `profiles`
+      - `id` (uuid, primary key, references auth.users)
+      - `email` (text, unique)
+      - `full_name` (text)
+      - `avatar_url` (text, optional)
+      - `location` (text, optional)
+      - `phone` (text, optional)
+      - `preferences` (text array for user preferences)
+      - `created_at` (timestamp)
+
+  2. Security
+    - Enable RLS on `profiles` table
+    - Add policy for users to read and update their own profile
+    - Add policy for public read access to basic profile info
+*/
+
+CREATE TABLE IF NOT EXISTS profiles (
+  id uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  email text UNIQUE NOT NULL,
+  full_name text NOT NULL,
+  avatar_url text,
+  location text,
+  phone text,
+  preferences text[] DEFAULT '{}',
+  created_at timestamptz DEFAULT now()
+);
+
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+
+-- Users can read and update their own profile
+CREATE POLICY "Users can read own profile"
+  ON profiles
+  FOR SELECT
+  TO authenticated
+  USING (auth.uid() = id);
+
+CREATE POLICY "Users can update own profile"
+  ON profiles
+  FOR UPDATE
+  TO authenticated
+  USING (auth.uid() = id);
+
+-- Allow users to insert their own profile
+CREATE POLICY "Users can insert own profile"
+  ON profiles
+  FOR INSERT
+  TO authenticated
+  WITH CHECK (auth.uid() = id);
+
+-- Function to automatically create profile on user signup
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS trigger AS $$
+BEGIN
+  INSERT INTO public.profiles (id, email, full_name)
+  VALUES (new.id, new.email, COALESCE(new.raw_user_meta_data->>'full_name', 'User'));
+  RETURN new;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Trigger to create profile on signup
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE PROCEDURE public.handle_new_user();
+
+
+  ***************************************************************
+
+  /*
+  # Create experiences table
+
+  1. New Tables
+    - `experiences`
+      - `id` (uuid, primary key)
+      - `title` (text, experience name)
+      - `category` (text, type of experience)
+      - `location` (text, where it takes place)
+      - `rating` (numeric, average rating)
+      - `reviews` (integer, number of reviews)
+      - `price` (text, price range indicator)
+      - `image` (text, image URL)
+      - `description` (text, detailed description)
+      - `features` (text array, what's included)
+      - `duration` (text, optional duration info)
+      - `available_slots` (text array, available time slots)
+      - `created_at` (timestamp)
+
+  2. Security
+    - Enable RLS on `experiences` table
+    - Add policy for public read access to all experiences
+    - Add policy for authenticated users to read experiences
+*/
+
+CREATE TABLE IF NOT EXISTS experiences (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  title text NOT NULL,
+  category text NOT NULL,
+  location text NOT NULL,
+  rating numeric(2,1) DEFAULT 0.0,
+  reviews integer DEFAULT 0,
+  price text NOT NULL,
+  image text NOT NULL,
+  description text NOT NULL,
+  features text[] DEFAULT '{}',
+  duration text,
+  available_slots text[] DEFAULT '{}',
+  created_at timestamptz DEFAULT now()
+);
+
+ALTER TABLE experiences ENABLE ROW LEVEL SECURITY;
+
+-- Allow public read access to experiences
+CREATE POLICY "Anyone can read experiences"
+  ON experiences
+  FOR SELECT
+  TO public
+  USING (true);
+
+-- Create indexes for better performance
+CREATE INDEX IF NOT EXISTS idx_experiences_category ON experiences(category);
+CREATE INDEX IF NOT EXISTS idx_experiences_rating ON experiences(rating DESC);
+CREATE INDEX IF NOT EXISTS idx_experiences_created_at ON experiences(created_at DESC);
+
+***************************************************************************************************
+
+/*
+  # Create bookings table
+
+  1. New Tables
+    - `bookings`
+      - `id` (uuid, primary key)
+      - `user_id` (uuid, references profiles)
+      - `experience_id` (uuid, references experiences)
+      - `date` (date, booking date)
+      - `time` (text, booking time)
+      - `guests` (integer, number of guests)
+      - `status` (text, booking status)
+      - `special_requests` (text, optional special requests)
+      - `created_at` (timestamp)
+
+  2. Security
+    - Enable RLS on `bookings` table
+    - Add policy for users to read their own bookings
+    - Add policy for users to create their own bookings
+    - Add policy for users to update their own bookings
+*/
+
+CREATE TABLE IF NOT EXISTS bookings (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  experience_id uuid NOT NULL REFERENCES experiences(id) ON DELETE CASCADE,
+  date date NOT NULL,
+  time text NOT NULL,
+  guests integer NOT NULL DEFAULT 1,
+  status text NOT NULL DEFAULT 'confirmed' CHECK (status IN ('confirmed', 'pending', 'cancelled', 'completed')),
+  special_requests text,
+  created_at timestamptz DEFAULT now()
+);
+
+ALTER TABLE bookings ENABLE ROW LEVEL SECURITY;
+
+-- Users can read their own bookings
+CREATE POLICY "Users can read own bookings"
+  ON bookings
+  FOR SELECT
+  TO authenticated
+  USING (auth.uid() = user_id);
+
+-- Users can create their own bookings
+CREATE POLICY "Users can create own bookings"
+  ON bookings
+  FOR INSERT
+  TO authenticated
+  WITH CHECK (auth.uid() = user_id);
+
+-- Users can update their own bookings
+CREATE POLICY "Users can update own bookings"
+  ON bookings
+  FOR UPDATE
+  TO authenticated
+  USING (auth.uid() = user_id);
+
+-- Create indexes for better performance
+CREATE INDEX IF NOT EXISTS idx_bookings_user_id ON bookings(user_id);
+CREATE INDEX IF NOT EXISTS idx_bookings_experience_id ON bookings(experience_id);
+CREATE INDEX IF NOT EXISTS idx_bookings_date ON bookings(date);
+CREATE INDEX IF NOT EXISTS idx_bookings_status ON bookings(status);
+
+***************************************************************************************************
+
+/*
+  # Create favorites table
+
+  1. New Tables
+    - `favorites`
+      - `id` (uuid, primary key)
+      - `user_id` (uuid, references profiles)
+      - `experience_id` (uuid, references experiences)
+      - `created_at` (timestamp)
+
+  2. Security
+    - Enable RLS on `favorites` table
+    - Add policy for users to manage their own favorites
+    - Add unique constraint to prevent duplicate favorites
+
+  3. Constraints
+    - Unique constraint on user_id + experience_id combination
+*/
+
+CREATE TABLE IF NOT EXISTS favorites (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  experience_id uuid NOT NULL REFERENCES experiences(id) ON DELETE CASCADE,
+  created_at timestamptz DEFAULT now(),
+  UNIQUE(user_id, experience_id)
+);
+
+ALTER TABLE favorites ENABLE ROW LEVEL SECURITY;
+
+-- Users can read their own favorites
+CREATE POLICY "Users can read own favorites"
+  ON favorites
+  FOR SELECT
+  TO authenticated
+  USING (auth.uid() = user_id);
+
+-- Users can create their own favorites
+CREATE POLICY "Users can create own favorites"
+  ON favorites
+  FOR INSERT
+  TO authenticated
+  WITH CHECK (auth.uid() = user_id);
+
+-- Users can delete their own favorites
+CREATE POLICY "Users can delete own favorites"
+  ON favorites
+  FOR DELETE
+  TO authenticated
+  USING (auth.uid() = user_id);
+
+-- Create indexes for better performance
+CREATE INDEX IF NOT EXISTS idx_favorites_user_id ON favorites(user_id);
+CREATE INDEX IF NOT EXISTS idx_favorites_experience_id ON favorites(experience_id);
+
+***************************************************************************************************
+
+/*
+  # Insert sample experiences data
+
+  1. Sample Data
+    - Insert 6 high-quality sample experiences
+    - Cover different categories: Dining, Wellness, Entertainment, Nightlife
+    - Include realistic ratings, reviews, and pricing
+    - Add comprehensive features and available time slots
+
+  2. Data Quality
+    - High-quality Pexels images for each experience
+    - Realistic descriptions and features
+    - Proper time slots for different experience types
+    - Varied price ranges and locations
+*/
+
+INSERT INTO experiences (
+  title,
+  category,
+  location,
+  rating,
+  reviews,
+  price,
+  image,
+  description,
+  features,
+  duration,
+  available_slots
+) VALUES 
+(
+  'The Golden Spoon',
+  'Dining',
+  'Downtown',
+  4.9,
+  342,
+  '$$$',
+  'https://images.pexels.com/photos/696218/pexels-photo-696218.jpeg?auto=compress&cs=tinysrgb&w=800',
+  'Award-winning contemporary cuisine with breathtaking city views. Our chef-curated tasting menu features locally sourced ingredients.',
+  ARRAY['7-course tasting menu', 'Wine pairing available', 'City skyline views', 'Private dining rooms'],
+  '2-3 hours',
+  ARRAY['6:00 PM', '7:00 PM', '8:00 PM', '9:00 PM']
+),
+(
+  'Serenity Wellness Center',
+  'Wellness',
+  'Uptown',
+  4.8,
+  156,
+  '$$',
+  'https://images.pexels.com/photos/3865809/pexels-photo-3865809.jpeg?auto=compress&cs=tinysrgb&w=800',
+  'Holistic treatments in a tranquil environment. Experience rejuvenation through our signature wellness programs.',
+  ARRAY['Full body massage', 'Aromatherapy session', 'Meditation garden access', 'Healthy refreshments'],
+  '90 minutes',
+  ARRAY['9:00 AM', '11:00 AM', '2:00 PM', '4:00 PM']
+),
+(
+  'Skyline Bar & Lounge',
+  'Nightlife',
+  'City Center',
+  4.7,
+  289,
+  '$$',
+  'https://images.pexels.com/photos/1267320/pexels-photo-1267320.jpeg?auto=compress&cs=tinysrgb&w=800',
+  'Craft cocktails with panoramic city views. Our mixologists create unique drinks inspired by the urban landscape.',
+  ARRAY['Craft cocktails', 'Live DJ sets', '360° city views', 'VIP seating available'],
+  '2-4 hours',
+  ARRAY['5:00 PM', '7:00 PM', '9:00 PM', '11:00 PM']
+),
+(
+  'Artisan Coffee House',
+  'Dining',
+  'Arts District',
+  4.6,
+  428,
+  '$',
+  'https://images.pexels.com/photos/302899/pexels-photo-302899.jpeg?auto=compress&cs=tinysrgb&w=800',
+  'Locally roasted coffee in a cozy atmosphere. Perfect for work, meetings, or simply enjoying exceptional coffee.',
+  ARRAY['Single-origin coffee', 'Fresh pastries', 'Free WiFi', 'Outdoor seating'],
+  '1-2 hours',
+  ARRAY['7:00 AM', '9:00 AM', '11:00 AM', '2:00 PM']
+),
+(
+  'Luxury Spa Retreat',
+  'Wellness',
+  'Resort District',
+  4.9,
+  203,
+  '$$$',
+  'https://images.pexels.com/photos/3757942/pexels-photo-3757942.jpeg?auto=compress&cs=tinysrgb&w=800',
+  'Ultimate relaxation experience with premium treatments and world-class facilities.',
+  ARRAY['Hot stone massage', 'Facial treatment', 'Sauna access', 'Champagne service'],
+  '3-4 hours',
+  ARRAY['10:00 AM', '1:00 PM', '4:00 PM']
+),
+(
+  'Rooftop Wine Tasting',
+  'Entertainment',
+  'Historic Quarter',
+  4.8,
+  167,
+  '$$',
+  'https://images.pexels.com/photos/3755440/pexels-photo-3755440.jpeg?auto=compress&cs=tinysrgb&w=800',
+  'Curated wine selection with expert sommelier guidance in an elegant rooftop setting.',
+  ARRAY['5 wine tastings', 'Cheese pairings', 'Sommelier guidance', 'Sunset views'],
+  '2 hours',
+  ARRAY['4:00 PM', '6:00 PM', '8:00 PM']
+)
+ON CONFLICT DO NOTHING;
+
+*******************************************************************************************************************
+
+/*
+  # Fix Profile Creation RLS Issue
+
+  1. Updates
+    - Update the handle_new_user function to properly create profiles
+    - Ensure the function runs with proper security context
+    - Add better error handling for profile creation
+
+  2. Security
+    - Maintain RLS policies but ensure they work during signup
+    - Use SECURITY DEFINER to allow profile creation during signup
+*/
+
+-- Drop existing function and trigger
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+DROP FUNCTION IF EXISTS public.handle_new_user();
+
+-- Recreate the function with better error handling
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS trigger AS $$
+BEGIN
+  INSERT INTO public.profiles (id, email, full_name, preferences)
+  VALUES (
+    new.id, 
+    new.email, 
+    COALESCE(new.raw_user_meta_data->>'full_name', 'User'),
+    '{}'::text[]
+  );
+  RETURN new;
+EXCEPTION
+  WHEN others THEN
+    -- Log the error but don't fail the user creation
+    RAISE LOG 'Error creating profile for user %: %', new.id, SQLERRM;
+    RETURN new;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Recreate the trigger
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+-- Update RLS policies to be more permissive during profile creation
+DROP POLICY IF EXISTS "Users can insert own profile" ON profiles;
+
+CREATE POLICY "Users can insert own profile"
+  ON profiles
+  FOR INSERT
+  TO authenticated
+  WITH CHECK (true);
+
+-- Also allow service role to insert profiles (for the trigger)
+CREATE POLICY "Service role can insert profiles"
+  ON profiles
+  FOR INSERT
+  TO service_role
+  WITH CHECK (true);
+
+  *******************************************************************************
+
+  /*
+  # Fix Email Confirmation and Profile Creation Issues
+
+  1. Updates
+    - Update RLS policies to handle profile creation during signup
+    - Fix the trigger function to work with email confirmation flow
+    - Add better error handling for profile creation
+    - Ensure profiles are created even if email is not confirmed
+
+  2. Security
+    - Maintain secure RLS policies
+    - Allow profile creation during the signup process
+    - Handle both confirmed and unconfirmed users
+*/
+
+-- Drop existing policies and recreate them
+DROP POLICY IF EXISTS "Users can insert own profile" ON profiles;
+DROP POLICY IF EXISTS "Service role can insert profiles" ON profiles;
+
+-- Allow authenticated users to insert their own profile
+CREATE POLICY "Users can insert own profile"
+  ON profiles
+  FOR INSERT
+  TO authenticated
+  WITH CHECK (auth.uid() = id);
+
+-- Allow the trigger function to insert profiles
+CREATE POLICY "System can insert profiles"
+  ON profiles
+  FOR INSERT
+  TO service_role
+  WITH CHECK (true);
+
+-- Update the trigger function to handle email confirmation better
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS trigger AS $$
+BEGIN
+  -- Insert profile regardless of email confirmation status
+  INSERT INTO public.profiles (id, email, full_name, preferences)
+  VALUES (
+    new.id, 
+    new.email, 
+    COALESCE(
+      new.raw_user_meta_data->>'full_name', 
+      split_part(new.email, '@', 1),
+      'User'
+    ),
+    '{}'::text[]
+  );
+  RETURN new;
+EXCEPTION
+  WHEN unique_violation THEN
+    -- Profile already exists, that's fine
+    RETURN new;
+  WHEN others THEN
+    -- Log the error but don't fail the user creation
+    RAISE LOG 'Error creating profile for user %: %', new.id, SQLERRM;
+    RETURN new;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Ensure the trigger exists
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+-- Add a function to manually create missing profiles
+CREATE OR REPLACE FUNCTION public.create_missing_profile(user_id uuid, user_email text, user_name text DEFAULT 'User')
+RETURNS void AS $$
+BEGIN
+  INSERT INTO public.profiles (id, email, full_name, preferences)
+  VALUES (user_id, user_email, user_name, '{}'::text[])
+  ON CONFLICT (id) DO NOTHING;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+*******************************************************************************************
+
+/*
+  # Disable Email Confirmation for Development
+
+  This migration helps with development by ensuring users can sign in immediately
+  after creating an account without needing to confirm their email.
+  
+  Note: In production, you may want to re-enable email confirmation for security.
+*/
+
+-- Update auth settings to disable email confirmation
+-- Note: This needs to be done in the Supabase dashboard under Authentication > Settings
+-- Set "Confirm email" to OFF for development
+
+-- Alternatively, you can manually confirm existing users:
+-- UPDATE auth.users SET email_confirmed_at = NOW() WHERE email_confirmed_at IS NULL;
+
+-- Create a function to manually confirm users if needed
+CREATE OR REPLACE FUNCTION public.confirm_user_email(user_email text)
+RETURNS void AS $$
+BEGIN
+  UPDATE auth.users 
+  SET email_confirmed_at = NOW() 
+  WHERE email = user_email AND email_confirmed_at IS NULL;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;

@@ -1,0 +1,258 @@
+/*
+  ============================
+  # PROFILES TABLE & POLICIES
+  ============================
+*/
+
+CREATE TABLE IF NOT EXISTS profiles (
+  id uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  email text UNIQUE NOT NULL,
+  full_name text NOT NULL,
+  avatar_url text,
+  location text,
+  phone text,
+  preferences text[] DEFAULT '{}',
+  created_at timestamptz DEFAULT now()
+);
+
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+
+-- Policies
+CREATE POLICY "Users can read own profile"
+  ON profiles FOR SELECT TO authenticated
+  USING (auth.uid() = id);
+
+CREATE POLICY "Users can update own profile"
+  ON profiles FOR UPDATE TO authenticated
+  USING (auth.uid() = id);
+
+CREATE POLICY "Users can insert own profile"
+  ON profiles FOR INSERT TO authenticated
+  WITH CHECK (auth.uid() = id);
+
+CREATE POLICY "System can insert profiles"
+  ON profiles FOR INSERT TO service_role
+  WITH CHECK (true);
+
+-- Trigger function for profile creation
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS trigger AS $$
+BEGIN
+  INSERT INTO public.profiles (id, email, full_name, preferences)
+  VALUES (
+    new.id, 
+    new.email, 
+    COALESCE(
+      new.raw_user_meta_data->>'full_name', 
+      split_part(new.email, '@', 1),
+      'User'
+    ),
+    '{}'::text[]
+  );
+  RETURN new;
+EXCEPTION
+  WHEN unique_violation THEN
+    RETURN new;
+  WHEN others THEN
+    RAISE LOG 'Error creating profile for user %: %', new.id, SQLERRM;
+    RETURN new;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Trigger
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+-- Manual helper function for missing profiles
+CREATE OR REPLACE FUNCTION public.create_missing_profile(
+  user_id uuid, 
+  user_email text, 
+  user_name text DEFAULT 'User'
+)
+RETURNS void AS $$
+BEGIN
+  INSERT INTO public.profiles (id, email, full_name, preferences)
+  VALUES (user_id, user_email, user_name, '{}'::text[])
+  ON CONFLICT (id) DO NOTHING;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+
+/*
+  ============================
+  # EXPERIENCES TABLE & POLICIES
+  ============================
+*/
+
+CREATE TABLE IF NOT EXISTS experiences (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  title text NOT NULL,
+  category text NOT NULL,
+  location text NOT NULL,
+  rating numeric(2,1) DEFAULT 0.0,
+  reviews integer DEFAULT 0,
+  price text NOT NULL,
+  image text NOT NULL,
+  description text NOT NULL,
+  features text[] DEFAULT '{}',
+  duration text,
+  available_slots text[] DEFAULT '{}',
+  created_at timestamptz DEFAULT now()
+);
+
+ALTER TABLE experiences ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Anyone can read experiences"
+  ON experiences FOR SELECT TO public
+  USING (true);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_experiences_category ON experiences(category);
+CREATE INDEX IF NOT EXISTS idx_experiences_rating ON experiences(rating DESC);
+CREATE INDEX IF NOT EXISTS idx_experiences_created_at ON experiences(created_at DESC);
+
+
+/*
+  ============================
+  # BOOKINGS TABLE & POLICIES
+  ============================
+*/
+
+CREATE TABLE IF NOT EXISTS bookings (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  experience_id uuid NOT NULL REFERENCES experiences(id) ON DELETE CASCADE,
+  date date NOT NULL,
+  time text NOT NULL,
+  guests integer NOT NULL DEFAULT 1,
+  status text NOT NULL DEFAULT 'confirmed' CHECK (status IN ('confirmed', 'pending', 'cancelled', 'completed')),
+  special_requests text,
+  created_at timestamptz DEFAULT now()
+);
+
+ALTER TABLE bookings ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can read own bookings"
+  ON bookings FOR SELECT TO authenticated
+  USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can create own bookings"
+  ON bookings FOR INSERT TO authenticated
+  WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can update own bookings"
+  ON bookings FOR UPDATE TO authenticated
+  USING (auth.uid() = user_id);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_bookings_user_id ON bookings(user_id);
+CREATE INDEX IF NOT EXISTS idx_bookings_experience_id ON bookings(experience_id);
+CREATE INDEX IF NOT EXISTS idx_bookings_date ON bookings(date);
+CREATE INDEX IF NOT EXISTS idx_bookings_status ON bookings(status);
+
+
+/*
+  ============================
+  # FAVORITES TABLE & POLICIES
+  ============================
+*/
+
+CREATE TABLE IF NOT EXISTS favorites (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  experience_id uuid NOT NULL REFERENCES experiences(id) ON DELETE CASCADE,
+  created_at timestamptz DEFAULT now(),
+  UNIQUE(user_id, experience_id)
+);
+
+ALTER TABLE favorites ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can read own favorites"
+  ON favorites FOR SELECT TO authenticated
+  USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can create own favorites"
+  ON favorites FOR INSERT TO authenticated
+  WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can delete own favorites"
+  ON favorites FOR DELETE TO authenticated
+  USING (auth.uid() = user_id);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_favorites_user_id ON favorites(user_id);
+CREATE INDEX IF NOT EXISTS idx_favorites_experience_id ON favorites(experience_id);
+
+
+/*
+  ============================
+  # SAMPLE DATA FOR EXPERIENCES
+  ============================
+*/
+
+INSERT INTO experiences (
+  title, category, location, rating, reviews, price, image, description, features, duration, available_slots
+) VALUES 
+(
+  'The Golden Spoon', 'Dining', 'Downtown', 4.9, 342, '$$$',
+  'https://images.pexels.com/photos/696218/pexels-photo-696218.jpeg?auto=compress&cs=tinysrgb&w=800',
+  'Award-winning contemporary cuisine with breathtaking city views. Our chef-curated tasting menu features locally sourced ingredients.',
+  ARRAY['7-course tasting menu', 'Wine pairing available', 'City skyline views', 'Private dining rooms'],
+  '2-3 hours', ARRAY['6:00 PM', '7:00 PM', '8:00 PM', '9:00 PM']
+),
+(
+  'Serenity Wellness Center', 'Wellness', 'Uptown', 4.8, 156, '$$',
+  'https://images.pexels.com/photos/3865809/pexels-photo-3865809.jpeg?auto=compress&cs=tinysrgb&w=800',
+  'Holistic treatments in a tranquil environment. Experience rejuvenation through our signature wellness programs.',
+  ARRAY['Full body massage', 'Aromatherapy session', 'Meditation garden access', 'Healthy refreshments'],
+  '90 minutes', ARRAY['9:00 AM', '11:00 AM', '2:00 PM', '4:00 PM']
+),
+(
+  'Skyline Bar & Lounge', 'Nightlife', 'City Center', 4.7, 289, '$$',
+  'https://images.pexels.com/photos/1267320/pexels-photo-1267320.jpeg?auto=compress&cs=tinysrgb&w=800',
+  'Craft cocktails with panoramic city views. Our mixologists create unique drinks inspired by the urban landscape.',
+  ARRAY['Craft cocktails', 'Live DJ sets', '360° city views', 'VIP seating available'],
+  '2-4 hours', ARRAY['5:00 PM', '7:00 PM', '9:00 PM', '11:00 PM']
+),
+(
+  'Artisan Coffee House', 'Dining', 'Arts District', 4.6, 428, '$',
+  'https://images.pexels.com/photos/302899/pexels-photo-302899.jpeg?auto=compress&cs=tinysrgb&w=800',
+  'Locally roasted coffee in a cozy atmosphere. Perfect for work, meetings, or simply enjoying exceptional coffee.',
+  ARRAY['Single-origin coffee', 'Fresh pastries', 'Free WiFi', 'Outdoor seating'],
+  '1-2 hours', ARRAY['7:00 AM', '9:00 AM', '11:00 AM', '2:00 PM']
+),
+(
+  'Luxury Spa Retreat', 'Wellness', 'Resort District', 4.9, 203, '$$$',
+  'https://images.pexels.com/photos/3757942/pexels-photo-3757942.jpeg?auto=compress&cs=tinysrgb&w=800',
+  'Ultimate relaxation experience with premium treatments and world-class facilities.',
+  ARRAY['Hot stone massage', 'Facial treatment', 'Sauna access', 'Champagne service'],
+  '3-4 hours', ARRAY['10:00 AM', '1:00 PM', '4:00 PM']
+),
+(
+  'Rooftop Wine Tasting', 'Entertainment', 'Historic Quarter', 4.8, 167, '$$',
+  'https://images.pexels.com/photos/3755440/pexels-photo-3755440.jpeg?auto=compress&cs=tinysrgb&w=800',
+  'Curated wine selection with expert sommelier guidance in an elegant rooftop setting.',
+  ARRAY['5 wine tastings', 'Cheese pairings', 'Sommelier guidance', 'Sunset views'],
+  '2 hours', ARRAY['4:00 PM', '6:00 PM', '8:00 PM']
+)
+ON CONFLICT DO NOTHING;
+
+
+/*
+  ============================
+  # DEV HELPERS
+  ============================
+*/
+
+-- Disable email confirmation in dev (set via Supabase dashboard)
+-- Or manually confirm users
+CREATE OR REPLACE FUNCTION public.confirm_user_email(user_email text)
+RETURNS void AS $$
+BEGIN
+  UPDATE auth.users 
+  SET email_confirmed_at = NOW() 
+  WHERE email = user_email AND email_confirmed_at IS NULL;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
